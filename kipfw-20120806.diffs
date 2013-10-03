@@ -1,0 +1,128 @@
+diff -urp --exclude Makefile /home/luigi/FreeBSD/head/sys/netinet/ipfw/ip_dn_io.c sys/netinet/ipfw/ip_dn_io.c
+--- /home/luigi/FreeBSD/head/sys/netinet/ipfw/ip_dn_io.c	2012-08-06 13:00:28.000000000 +0200
++++ sys/netinet/ipfw/ip_dn_io.c	2012-08-06 11:06:21.000000000 +0200
+@@ -260,6 +255,24 @@ dn_tag_get(struct mbuf *m)
+ static inline void
+ mq_append(struct mq *q, struct mbuf *m)
+ {
++#ifdef USERSPACE
++	// buffers from netmap need to be copied
++	// XXX note that the routine is not expected to fail
++	ND("append %p to %p", m, q);
++	if (m->m_flags & M_STACK) {
++		struct mbuf *m_new;
++		void *p;
++		int l, ofs;
++
++		ofs = m->m_data - m->__m_extbuf;
++		// XXX allocate
++		MGETHDR(m_new, M_DONTWAIT, MT_DATA);
++		ND("*** WARNING, volatile buf %p ext %p %d dofs %d m_new %p",
++			m, m->__m_extbuf, m->__m_extlen, ofs, m_new);
++		p = m_new->__m_extbuf;	/* new pointer */
++		l = m_new->__m_extlen;	/* new len */
++		if (l <= m->__m_extlen) {
++			panic("extlen too large");
++		}
++
++		*m_new = *m;	// copy
++		m_new->m_flags &= ~M_STACK;
++		m_new->__m_extbuf = p; // point to new buffer
++		pkt_copy(m->__m_extbuf, p, m->__m_extlen);
++		m_new->m_data = p + ofs;
++		m = m_new;
++	}
++#endif /* USERSPACE */
+ 	if (q->head == NULL)
+ 		q->head = m;
+ 	else
+diff -urp --exclude Makefile /home/luigi/FreeBSD/head/sys/netinet/ipfw/ip_fw2.c sys/netinet/ipfw/ip_fw2.c
+--- /home/luigi/FreeBSD/head/sys/netinet/ipfw/ip_fw2.c	2012-08-03 15:53:27.000000000 +0200
++++ sys/netinet/ipfw/ip_fw2.c	2012-08-06 12:49:56.000000000 +0200
+@@ -364,7 +364,7 @@ iface_match(struct ifnet *ifp, ipfw_insn
+ 				return(1);
+ 		}
+ 	} else {
+-#ifdef __FreeBSD__	/* and OSX too ? */
++#if !defined(USERSPACE) && defined(__FreeBSD__)	/* and OSX too ? */
+ 		struct ifaddr *ia;
+ 
+ 		if_addr_rlock(ifp);
+@@ -407,7 +407,7 @@ iface_match(struct ifnet *ifp, ipfw_insn
+ static int
+ verify_path(struct in_addr src, struct ifnet *ifp, u_int fib)
+ {
+-#ifndef __FreeBSD__
++#if defined(USERSPACE) || !defined(__FreeBSD__)
+ 	return 0;
+ #else
+ 	struct route ro;
+@@ -660,6 +660,9 @@ static int
+ check_uidgid(ipfw_insn_u32 *insn, struct ip_fw_args *args, int *ugid_lookupp,
+     struct ucred **uc)
+ {
++#if defined(USERSPACE)
++	return 0;	// not supported in userspace
++#else
+ #ifndef __FreeBSD__
+ 	/* XXX */
+ 	return cred_check(insn, proto, oif,
+@@ -762,6 +765,7 @@ check_uidgid(ipfw_insn_u32 *insn, struct
+ 		match = ((*uc)->cr_prison->pr_id == (int)insn->d[0]);
+ 	return (match);
+ #endif /* __FreeBSD__ */
++#endif /* not supported in userspace */
+ }
+ 
+ /*
+@@ -1428,6 +1432,7 @@ do {								\
+ 					    key = htonl(dst_port);
+ 					else if (v == 3)
+ 					    key = htonl(src_port);
++#ifndef USERSPACE
+ 					else if (v == 4 || v == 5) {
+ 					    check_uidgid(
+ 						(ipfw_insn_u32 *)cmd,
+@@ -1447,6 +1452,7 @@ do {								\
+ #endif /* !__FreeBSD__ */
+ 					    key = htonl(key);
+ 					} else
++#endif /* !USERSPACE */
+ 					    break;
+ 				    }
+ 				    match = ipfw_lookup_table(chain,
+@@ -1875,6 +1881,7 @@ do {								\
+ 				break;
+ 
+ 			case O_SOCKARG:	{
++#ifndef USERSPACE	/* not supported in userspace */
+ 				struct inpcb *inp = args->inp;
+ 				struct inpcbinfo *pi;
+ 				
+@@ -1915,6 +1922,7 @@ do {								\
+ 							match = 1;
+ 					}
+ 				}
++#endif /* !USERSPACE */
+ 				break;
+ 			}
+ 
+diff -urp --exclude Makefile /home/luigi/FreeBSD/head/sys/netinet/ipfw/ip_fw_log.c sys/netinet/ipfw/ip_fw_log.c
+--- /home/luigi/FreeBSD/head/sys/netinet/ipfw/ip_fw_log.c	2012-08-06 12:48:48.000000000 +0200
++++ sys/netinet/ipfw/ip_fw_log.c	2012-08-05 14:08:49.000000000 +0200
+@@ -83,8 +83,15 @@ __FBSDID("$FreeBSD: head/sys/netinet/ipf
+ #define	ICMP(p)		((struct icmphdr *)(p))
+ #define	ICMP6(p)	((struct icmp6_hdr *)(p))
+ 
++#ifdef __APPLE__
++#undef snprintf
++#define snprintf	sprintf
++#define SNPARGS(buf, len) buf + len
++#define SNP(buf) buf
++#else	/* !__APPLE__ */
+ #define SNPARGS(buf, len) buf + len, sizeof(buf) > len ? sizeof(buf) - len : 0
+ #define SNP(buf) buf, sizeof(buf)
++#endif /* !__APPLE__ */
+ 
+ #ifdef WITHOUT_BPF
+ void
